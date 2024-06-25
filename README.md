@@ -35,24 +35,34 @@ Navigate here in your webbrowser and download Influx for Windows
 
 <https://docs.influxdata.com/influxdb/v2/install/?t=Windows#>
 
-Navigate to your download directory, typically the Downloads folder.  
-
-`cd "$env:USERPROFILE\Downloads"`  
-
 ##### Expand the Archive
 
-`Expand-Archive .\influxdb2-2.7.6-windows.zip -DestinationPath 'C:\Program Files\InfluxData\'`  
-`mv 'C:\Program Files\InfluxData\influxdb2-2.7.6' 'C:\Program Files\InfluxData\influxdb'`
+Navigate to your download directory, typically the Downloads folder.  
+
+```powershell
+cd "$env:USERPROFILE\Downloads"
+```
+
+Expand the archive.  
+
+```powershell
+Expand-Archive .\influxdb2-2.7.6-windows.zip -DestinationPath 'C:\Program Files\InfluxData\'  
+mv 'C:\Program Files\InfluxData\influxdb2-2.7.6' 'C:\Program Files\InfluxData\influxdb'  
+```
 
 ##### Prep a Logging Directory
 
-`mkdir C:\Program Files\InfluxData\Logs`
+```powershell
+mkdir C:\Program Files\InfluxData\Logs  
+```
 
 ##### Start InfluxDB in the Background
 
 Navigate to the program directory.  
 
-`cd 'C:\Program Files\InfluxData'`
+```powershell
+cd 'C:\Program Files\InfluxData'
+```
 
 Start the process.  
 
@@ -80,7 +90,7 @@ Enter details:
 * Initial Bucket Name: "mybucket"  
 
 Click "Continue"  
-Copy the Operator Token:  `FWXhz_lugbAc2OKebi66aKpCQqMSK8ALRU-ymB_mejyhEe-5pQhn_feCedG4mG4YlLfEC0HiS25koqms4zXuxw==`  
+Copy the Operator Token:  `<operator_token>`  
 Click "Configure Later"
 
 ### Install and Configure Influx CLI
@@ -93,8 +103,10 @@ Navigate to:
 
 #### Install InfluxCLI
 
-`Expand-Archive .\influxdb2-client-2.7.5-windows-amd64.zip -DestinationPath 'C:\Program Files\InfluxData\'`  
-`mv 'C:\Program Files\InfluxData\influxdb2-client-2.7.5-windows-amd64' 'C:\Program Files\InfluxData\influx'`
+```powershell
+Expand-Archive .\influxdb2-client-2.7.5-windows-amd64.zip -DestinationPath 'C:\Program Files\InfluxData\'  
+mv 'C:\Program Files\InfluxData\influxdb2-client-2.7.5-windows-amd64' 'C:\Program Files\InfluxData\influx'  
+```
 
 #### Configure InfluxCLI  
 
@@ -102,20 +114,29 @@ Navigate to:
 ./influx config create --config-name myconfig `
   -u 'http://localhost:8086' `
   -o 'myorg' `
-  -t 'FWXhz_lugbAc2OKebi66aKpCQqMSK8ALRU-ymB_mejyhEe-5pQhn_feCedG4mG4YlLfEC0HiS25koqms4zXuxw==' `
+  -t '<operator_token>' `
   -a
 ```
+
+The parameters represent:  
+
+* `-u` is the InfluxDB URL.  
+* `-o` is the organization name
+* `-t` is the operator_token we generated above
+* `-a` sets this as the active configuration for the cli
 
 #### Create an All Access Token  
 
 We will use this token to connect to InfluxDB from Grafana.  
 
-`./influx auth create --org myorg --all-access`  
+```powershell
+./influx auth create --org myorg --all-access  
+```
 
 Output  
 
 ```Powershell
-"KjZdXP-ivuKw7whV_LPIA3I2MKNHhge6R0Xc-4l8p5yylfr0XizJ5F2FCOki1rmxkphjUF1KaBppW28ngJgOpQ=="
+"<all_access_token>"
 ```
 
 ### Load Sample Influx Data  
@@ -124,7 +145,9 @@ In order to test the connection between Grafana and InfluxDB, we will need a sam
 
 Download the sample data set.  
 
-`curl https://s3.amazonaws.com/noaa.water-database/NOAA_data.txt -o NOAA_data.txt`  
+```powershell
+curl https://s3.amazonaws.com/noaa.water-database/NOAA_data.txt -o NOAA_data.txt  
+```
 
 Load the sample data into InfluxDB.  
 
@@ -171,7 +194,7 @@ mkdir 'C:\Program Files\GrafanaLabs\PDC\Logs'
 
 #### Launch PDC as Scheduled Task
 
-We want to launch the PDC every time this machine starts. So we'll use Windows Task Scheduler to achieve this. We want to launch the tast in the background but still have access to its stdout and stderr. For this, we can use the Pwershell `Start-Process` cmdlet. 
+We want to launch the PDC every time this machine starts. So we'll use Windows Task Scheduler to achieve this. We want to launch the tast in the background but still have access to its stdout and stderr. For this, we can use the Pwershell `Start-Process` cmdlet.  
 
 First, let's create a script that will launch the PDC. In the script we should set the environment variables for the PDC token, cluster, and hosted Grafana ID. Then we will set some standard location environment variables for the PDC working directory and log directory. Finally, we will define the command to launch the PDC in the background.  
 
@@ -236,12 +259,14 @@ Our next step should be to test the PDC. First, in Grafana Cloud, navigate to Ho
 Now, let's configure InfluxDB as a data source in Grafana. To do this, navigate to Home > Data Sources and click "Add Data Source" in the top right corner.
 From the list of data sources, select InfluxDB.
 
-Populate the following fields:
+Populate the following fields:  
 Name: `myInfluxDB`  
 Query Language: `InfluxQL`  
 URL: `http://localhost:8086`  
+
 Custom HTTP Headers:  
 Click + Add Header  
+
 Header: `Authorization` Value: `Token <your_all_access_token_created_above>`  
 Database: `mybucket`  
 HTTP Method: `GET`  
@@ -310,7 +335,7 @@ We will add the process metrics to the list of metrics to keep, resulting in:
 
 ##### Collect PDC Metrics and Logs
 
-I'm using a recent build of the PDC (newer than the "latest" release) which exposes a metrics endpoint. We can use this endpoint to collect metrics from the PDC. The PDC is writing logs to `C:\Program Files\GrafanaLabs\PDC\Logs\` so we can collect those as well.
+The newest build of PDC exposes a metrics endpoint. We can use this endpoint to collect metrics from the PDC. The PDC is writing logs to `C:\Program Files\GrafanaLabs\PDC\Logs\` so we can collect those as well.
 
 Add the following block to the Alloy configuration file:
 
