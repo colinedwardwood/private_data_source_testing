@@ -8,6 +8,7 @@
 [System.Environment]::SetEnvironmentVariable('PDC_LOG_DIR', 'C:\Program Files\GrafanaLabs\PDC\Logs')
 Start-Process -FilePath '.\pdc.exe' `
     -ArgumentList "-token $env:PDC_ARG_PDC_TOKEN","-cluster $env:PDC_ARG_CLUSTER","-gcloud-hosted-grafana-id $env:PDC_ARG_HOSTED_GRAFANA_ID","-log.level $env:PDC_ARG_LOG_LEVEL" `
+    -Wait `
     -WorkingDirectory "$env:PDC_WORKING_DIR" `
     -RedirectStandardOutput "$env:PDC_LOG_DIR\stdout.log" `
     -RedirectStandardError "$env:PDC_LOG_DIR\stderr.log"
