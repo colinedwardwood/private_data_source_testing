@@ -41,7 +41,16 @@ if ($service) {
         Write-ColorOutput green ("✔  - Found the Alloy Service Username")
         Write-ColorOutput blue ("     The $serviceName service is running as: $userName")
         if ($userName -eq "LocalSystem") {
-
+            Write-ColorOutput blue (". Adjusting the directories permissions")
+            $logsAcl = Get-Acl -Path $logsDirectory
+            if ($userName -eq "LocalSystem") {
+                $directoryAccessRule = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            } else {
+                $directoryAccessRule = New-Object System.Security.AccessControl.FileSystemAccessRule($userName, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            }
+            $logsAcl.SetAccessRule($directoryAccessRule)
+            Set-Acl -Path $logsDirectory -AclObject $logsAcl
+            Write-ColorOutput green ("✔  - Granted FullControl permission to $userName for $($logsDirectory)")
             Write-ColorOutput blue (". Getting the files in the logs directory")
             $files = Get-ChildItem -Path $logsDirectory -File
             foreach ($file in $files) {
