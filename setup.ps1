@@ -1,4 +1,5 @@
 #requires -PSEdition Core
+$debug = $false; $args -contains '--debug' | ForEach-Object { $debug = $true }
 
 # Helper Functions
 function Write-ColorOutput($ForegroundColor) {
@@ -16,6 +17,33 @@ function exists {
     } else {
         Write-ColorOutput red ("×  - $path was not found.")
         return $false
+    }
+}
+
+function cleanup {
+    try {
+        Stop-Process -Name "pdc" -Force -ErrorAction Stop
+    } catch {
+        if ($debug) { Write-ColorOutput yellow ("DEBUG - ERROR - msg: `"$_`"") }
+    }
+    try {
+        Unregister-ScheduledTask -TaskName 'Grafana PDC' -Confirm:$false -ErrorAction Stop
+    } catch {
+        if ($debug) { Write-ColorOutput yellow ("DEBUG - ERROR - msg: `"$_`"") }
+    }
+    # Add verification of cleanup
+    try {
+        $process = Get-Process -Name "pdc" -ErrorAction Stop
+        Write-ColorOutput red ("×  -  The PDC Process is still running")
+    } catch {
+        if ($debug) { Write-ColorOutput yellow ("DEBUG - INFO - The PDC Process stopped") }
+    }
+    try {
+        $task = Get-ScheduledTask -TaskName 'Grafana PDC' -ErrorAction Stop
+        Write-ColorOutput red ("×  -  The Grafana PDC Scheduled Task still exists")
+    
+    } catch {
+        Write-ColorOutput yellow ("DEBUG - INFO - The Grafana PDC scheduled task has been removed")
     }
 }
 
@@ -68,6 +96,150 @@ function createFolder {
     }
 }
 
+function Show-ACLInfo {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$file
+    )
+
+    try {
+        $acl = Get-Acl -Path $file -ErrorAction Stop
+        $accessRules = $acl.Access
+
+        foreach ($rule in $accessRules) {
+            $userName = $rule.IdentityReference.Value
+            Write-Output "User: $userName"
+        }
+    } catch {
+        Write-Output "Failed to retrieve ACL for $file : $_"
+    }
+}
+
+function fixPermissions {
+    $file = "C:\Windows\System32\config\systemprofile\.ssh\grafana_pdc"
+    Write-Output " "
+    Write-ColorOutput blue ("Setting ACL for:")
+    Write-ColorOutput blue ("$file")
+    Write-Output " "
+    Write-ColorOutput blue ("Current ACL for:")
+    Write-ColorOutput blue ("$file")
+    Show-ACLInfo -file $file
+    Write-Output (" ")
+    Write-ColorOutput blue ("Trying to apply new ACL")
+    try {
+        # Create a new ACL object
+        $acl = New-Object System.Security.AccessControl.FileSecurity
+    
+        # Remove all existing access rules
+        $acl.SetAccessRuleProtection($true, $false) # Protects the ACL from inheritance but preserves existing rules
+        $acl.Access | ForEach-Object {
+            $acl.RemoveAccessRule($_)
+        }
+    
+        # Add permission for the specified user
+        $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "Allow")
+        $acl.AddAccessRule($accessRule)
+    
+        # Set the modified ACL to the file
+        Set-Acl -Path $file -AclObject $acl -ErrorAction Stop
+         Write-ColorOutput green ("✔  - Successfully adjusted permissions for $file")
+    } catch {
+        Write-ColorOutput red ("×  - Failed to adjust permissions for $file : $_")
+    }
+    Write-Output " "
+    Write-ColorOutput blue ("Current ACL for:")
+    Write-ColorOutput blue ("$file")
+    Show-ACLInfo -file $file
+}
+
+function testConnection {
+    # Test if the PDC process connected
+    $logFilePath = "$pdcLogPath\stdout.txt"
+    $found = $false
+    $successPattern = "This is Grafana Private Datasource Connect!"
+    $timeOutSec = 30
+    $timeOutTime = (Get-Date).AddSeconds($timeOutSec)
+
+    $fileStream = [System.IO.File]::Open($logFilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $streamReader = [System.IO.StreamReader]::new($fileStream)
+    
+   
+    while (-not $found -and ((Get-Date) -lt $timeOutTime)) {
+        while ($streamReader.Peek() -ge 0) {
+            $line = $streamReader.ReadLine()
+            if ($line -match "parsed flags") { # parsed flags
+                $msgPart = $line -replace "^.*msg=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"$msgPart`"")
+            }
+            elseif ($line -match "sshversion") { # ssh version
+                $msgPart = $line -replace "^.*sshversion=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"$msgPart`"")
+            }
+            elseif ($line -match "Connecting to") { # connecting to
+                $msgPart = $line -replace "^.*msg=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"$msgPart`"")
+            }
+            elseif ($line -match "Connection established") { # connection established
+                $msgPart = $line -replace "^.*msg=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"$msgPart`"")
+            }
+            elseif ($line -match "Host '.*' is known and matches the .* host certificate") { # host matches
+                $msgPart = $line -replace "^.*msg=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"$msgPart`"")
+            }
+            elseif ($line -match "send packet: type 20") { # Key exchange begins by each side sending SSH_MSG_KEXINIT
+                $msgPart = $line -replace "^.*msg=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"SSH_MSG_KEXINIT - BEGIN Key Exchange`"")             
+            }
+            elseif ($line -match "SSH_MSG_NEWKEYS received") { # Key exchange ends by each side sending an SSH_MSG_NEWKEYS message.
+                $msgPart = $line -replace "^.*msg=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"SSH_MSG_KEXINIT - END Key Exchange`"")
+                fixPermissions
+            } 
+            elseif ($line -match "receive packet: type 6") { # After the key exchange, the client requests a service. 
+                $msgPart = $line -replace "^.*msg=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"SSH_MSG_SERVICE_REQUEST - BEGIN Service Request`"")
+            }
+            elseif ($line -match "send packet: type 50") { # After the service request, an auth request is sent.
+                $msgPart = $line -replace "^.*msg=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"SSH_MSG_USERAUTH_REQUEST - BEGIN Auth Request`"")
+            }          
+            elseif ($line -match "receive packet: type 51") { # Auth failure SSH_MSG_USERAUTH_FAILURE.
+                $msgPart = $line -replace "^.*msg=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"SSH_MSG_USERAUTH_FAILURE - Failed to Authenticate`"")
+            }
+            elseif ($line -match "Bad permissions") { # bad permissions
+                $msgPart = $line -replace "^.*msg=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"$msgPart`"")
+                fixPermissions
+            }
+            elseif ($line -match "No more authentication methods to try.") { # Final auth failure no more methods to try.
+                $msgPart = $line -replace "^.*msg=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"SSH_MSG_USERAUTH_FAILURE - No more authentication methods to try.`"")
+            }
+            elseif ($line -match "ssh client exited. restarting") { # Client restart
+                $msgPart = $line -replace "^.*msg=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"SSH Client Restarting`"")
+            }
+            elseif ($line -match "receive packet: type 52") { # Auth success SSH_MSG_USERAUTH_SUCCESS.
+                $msgPart = $line -replace "^.*msg=`"([^`"]+)`".*$", '$1'
+                Write-ColorOutput yellow ("DEBUG - INFO - msg:`"SSH_MSG_USERAUTH_SUCCESS - Auth Success`"")
+            }
+            elseif ($line -match $successPattern) {
+                $found = $true
+                Write-ColorOutput green ("✔  - The PDC process connected successfully")
+                break
+            }
+        }
+        Start-Sleep -Seconds 1
+    }
+    $streamReader.Close()
+    $fileStream.Close()
+    if (-not $found) {
+        Write-ColorOutput red ("×  - The PDC process failed to connect")
+    }
+}
+
 
 $scriptStart = (Get-Date)
 Clear-Host
@@ -92,18 +264,11 @@ do {
 } while (!$done)
 
 Write-ColorOutput blue (" ")
-Write-ColorOutput blue ("==== Beginning setup tests ==============================================================")
+Write-ColorOutput blue ("==== Beginning clean up +++==============================================================")
 Write-ColorOutput blue (". Stopping any existing PDC processes and removing existing scheduled pdc tasks")
 
 # Do Quick Cleanup
-try {
-    Stop-Process -Name "pdc" -Force -ErrorAction Stop
-} catch {
-}
-try {
-    Unregister-ScheduledTask -TaskName 'Grafana PDC' -Confirm:$false -ErrorAction Stop
-} catch {
-}
+cleanup
 
 
 Write-ColorOutput blue (" ")
@@ -127,18 +292,21 @@ foreach ($v in $envvars) {
 # check if PDC directory exists
 $pdcPath = [System.Environment]::GetEnvironmentVariable("PDC_WORKING_DIR") # default - "C:\Program Files\GrafanaLabs\PDC"
 if (-not (exists($pdcPath))) {
+    if ($debug) { Write-ColorOutput yellow ("DEBUG - INFO - msg: `"The PDC Folder was not found. Creating it`"") }
     createFolder($pdcPath)
 }
 
 # check if pdc.exe file exists
 $filePath = "$pdcPath\pdc.exe"
 if (-not (exists($filePath))) {
+    if ($debug) { Write-ColorOutput yellow ("DEBUG - INFO - msg: `"The pdc.exe was not found asking for download`"") }
     downloadPDC
 }
 
 # check if PDC Logs directory exists
 $pdcLogPath = [System.Environment]::GetEnvironmentVariable("PDC_LOG_DIR") # default - "C:\Program Files\GrafanaLabs\PDC\Logs"
 if (-not (exists($pdcLogPath))) {
+    if ($debug) { Write-ColorOutput yellow ("DEBUG - INFO - msg: `"The PDC Folder was not found. Creating it`"") }
     createFolder($pdcLogPath)
 }
 
@@ -153,6 +321,18 @@ Write-ColorOutput blue ("==== Setup tests complete, beginning unit tests =======
 Write-ColorOutput blue (". Checking that the PDC will start and connect successfully.")
 
 # try starting the PDC process directly
+if ($debug) {
+    Write-ColorOutput yellow ("DEBUG - INFO - msg: `"Executing Start-Process with the following options:`"") 
+    Write-ColorOutput yellow ("DEBUG - INFO - msg: `"Start-Process`"") 
+    Write-ColorOutput yellow ("DEBUG - INFO - msg: `"-FilePath '.\pdc.exe'`"") 
+    Write-ColorOutput yellow ("DEBUG - INFO - msg: `"-token $env:PDC_ARG_PDC_TOKEN`"") 
+    Write-ColorOutput yellow ("DEBUG - INFO - msg: `"-cluster $env:PDC_ARG_CLUSTER`"") 
+    Write-ColorOutput yellow ("DEBUG - INFO - msg: `"-gcloud-hosted-grafana-id $env:PDC_ARG_HOSTED_GRAFANA_ID`"") 
+    Write-ColorOutput yellow ("DEBUG - INFO - msg: `"-log.level $env:PDC_ARG_LOG_LEVEL`"") 
+    Write-ColorOutput yellow ("DEBUG - INFO - msg: `"-NoNewWindow`"") 
+    Write-ColorOutput yellow ("DEBUG - INFO - msg: `"-RedirectStandardOutput `"$env:PDC_LOG_DIR\stdout.txt`"`"")
+    Write-ColorOutput yellow ("DEBUG - INFO - msg: `"-RedirectStandardError `"$env:PDC_LOG_DIR\stderr.txt`"`"") 
+}
 Start-Process -FilePath '.\pdc.exe' `
     -ArgumentList "-token $env:PDC_ARG_PDC_TOKEN","-cluster $env:PDC_ARG_CLUSTER","-gcloud-hosted-grafana-id $env:PDC_ARG_HOSTED_GRAFANA_ID","-log.level $env:PDC_ARG_LOG_LEVEL" `
     -WorkingDirectory "$env:PDC_WORKING_DIR" `
@@ -162,7 +342,6 @@ Start-Process -FilePath '.\pdc.exe' `
 
 # Test if the PDC process started
 $pdc_process =  Get-Process | Where-Object { $_.ProcessName -eq "pdc" } 
-
 if ($pdc_process) {
      Write-ColorOutput green ("✔  - The PDC process is running")
 } else {
@@ -170,23 +349,11 @@ if ($pdc_process) {
     exit(1)
 }
 
-$logFile = "$pdcLogPath\stdout.txt"
-$pattern = "This is Grafana Private Datasource Connect!"
-$timeOutSec = 30
-$found = $false
-$timeOutTime = (Get-Date).AddSeconds($timeOutSec)
-while (-not $found -and ((Get-Date) -lt $timeOutTime)) {
-    $content = Get-Content -Path $logFile -Raw -ErrorAction SilentlyContinue
-    if ($content -match $pattern) {
-        $found = $true
-        Write-ColorOutput green ("✔  - The PDC process connected successfully")
-    }
-}
-if (-not $found) {
-    Write-ColorOutput red ("×  - The PDC process failed to connect")
-}
+# Test if the PDC process connected
+testConnection
 
 # kill the pdc.exe process created above
+
 if ($pdc_process) {
     $pdc_process | Stop-Process -Force
     Write-ColorOutput green ("✔  - The test PDC process has been stopped")
@@ -244,6 +411,7 @@ Start-Sleep -Seconds 2                                               # let the t
 
 # ssh seems to apply wrong permissions to file so it won't connect, remove the extra permissions
 $file = "C:\Windows\System32\config\systemprofile\.ssh\grafana_pdc"     # target file
+# if (Test-Path -Path $file) {
 $acl = Get-Acl -Path $file                                              # get current acl of file
 $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_)| Out-Null }              # Remove existing permissions
 
@@ -252,34 +420,20 @@ $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule("SYS
 $acl.AddAccessRule($accessRule) | Out-Null
 Set-Acl -Path $file -AclObject $acl -ErrorAction SilentlyContinue | Out-Null  # Apply the modified ACL to the file
 Start-Sleep -Seconds 8
-
+# }
 
 # Test if the PDC process started
 $pdc_process = Get-Process | Where-Object { $_.ProcessName -eq "pdc" } 
 
 if ($pdc_process) {
-    Write-Output "✓ The PDC process is running"
+    Write-ColorOutput green ("✔  - The PDC process is running")
 } else {
-    Write-Output "✘ The PDC process failed"
+    Write-ColorOutput red ("×  - The PDC process failed")
     exit(1)
 }
 
 # Test if the PDC process connected
-$logFile = "$pdcLogPath\stdout.txt"
-$pattern = "This is Grafana Private Datasource Connect!"
-$timeOutSec = 30
-$found = $false
-$timeOutTime = (Get-Date).AddSeconds($timeOutSec)
-while (-not $found -and ((Get-Date) -lt $timeOutTime)) {
-    $content = Get-Content -Path $logFile -Raw -ErrorAction SilentlyContinue
-    if ($content -match $pattern) {
-        $found = $true
-        Write-Output "✓ The PDC process connected successfully"
-    }
-}
-if (-not $found) {
-    Write-Output "✘ The PDC process failed to connect"
-}
+testConnection
 
 
 Write-ColorOutput blue ("==== Setup complete ==========================================================================================")
